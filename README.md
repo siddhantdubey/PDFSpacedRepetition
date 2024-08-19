@@ -10,8 +10,8 @@ I don't know what to call this. The idea is to make something very similar to th
   - [x] Save
   - [x] Delete
   - [x] View
-- [ ] Flashcard View
-- [ ] Spaced Repetition
+- [x] Flashcard View
+- [x] Spaced Repetition
 
 ## FAQ
 

@@ -9,6 +9,9 @@ import FileSelector from './FileSelector';
 import React from 'react';
 import { PDFDocument, rgb } from 'pdf-lib';
 import { createPortal } from 'react-dom';
+import FlashcardCarousel from './FlashcardCarousel';
+import 'katex/dist/katex.min.css';
+import { InlineMath, BlockMath } from 'react-katex';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
@@ -30,6 +33,13 @@ type Annotation = {
   x: number;
   width: number;
   height: number;
+  rects: { x: number; y: number; width: number; height: number }[];
+  id: string;
+  state: 'new' | 'learning' | 'review' | 'relearning';
+  interval: number;
+  easeFactor: number;
+  dueDate: Date;
+  lastReviewed: Date | null;
 };
 
 export default function PDFViewer() {
@@ -59,6 +69,9 @@ export default function PDFViewer() {
   const [hoveredHighlight, setHoveredHighlight] = useState<{ page: number; index: number } | null>(null);
   const [openAnnotation, setOpenAnnotation] = useState<{ page: number; index: number } | null>(null);
   const [highlightRects, setHighlightRects] = useState<{ x: number; y: number; width: number; height: number }[]>([]);
+  const [showFlashcards, setShowFlashcards] = useState(false);
+  const [allFlashcards, setAllFlashcards] = useState<{ front: string; back: string }[]>([]);
+  const [previewLatex, setPreviewLatex] = useState(false);
 
   const onResize = useCallback<ResizeObserverCallback>((entries) => {
     const [entry] = entries;
@@ -82,7 +95,22 @@ export default function PDFViewer() {
     // Load saved annotations for this file
     const savedAnnotations = localStorage.getItem(`pdf_annotations_${selectedFile.name}`);
     if (savedAnnotations) {
-      setAnnotations(JSON.parse(savedAnnotations));
+      const parsedAnnotations = JSON.parse(savedAnnotations);
+      setAnnotations(parsedAnnotations);
+      
+      // Load flashcards into spaced repetition manager
+      Object.values(parsedAnnotations).flat().forEach((annotation: Annotation) => {
+        setAllFlashcards(prevFlashcards => [...prevFlashcards, {
+          id: annotation.id,
+          front: annotation.front,
+          back: annotation.back,
+          state: annotation.state,
+          interval: annotation.interval,
+          easeFactor: annotation.easeFactor,
+          dueDate: new Date(annotation.dueDate),
+          lastReviewed: annotation.lastReviewed ? new Date(annotation.lastReviewed) : null
+        }]);
+      });
     }
   };
 
@@ -238,7 +266,8 @@ export default function PDFViewer() {
 
   const addAnnotation = async () => {
     if (highlightedText && annotationFront && annotationBack && highlightPage && annotationPosition) {
-      const newAnnotation = {
+      const newAnnotation: Annotation = {
+        id: Date.now().toString(),
         front: annotationFront,
         back: annotationBack,
         position: window.scrollY,
@@ -248,6 +277,11 @@ export default function PDFViewer() {
         width: annotationPosition.width,
         height: annotationPosition.height,
         rects: highlightRects,
+        state: 'new',
+        interval: 0,
+        easeFactor: 2.5,
+        dueDate: new Date(),
+        lastReviewed: null,
       };
 
       setAnnotations((prevAnnotations) => {
@@ -270,7 +304,19 @@ export default function PDFViewer() {
         };
 
         // Save the updated annotations
-        localStorage.setItem(`pdf_annotations_${file?.name}`, JSON.stringify(updatedAnnotations));
+        saveAnnotations(updatedAnnotations);
+
+        // Add the flashcard to the spaced repetition manager
+        setAllFlashcards(prevFlashcards => [...prevFlashcards, {
+          id: newAnnotation.id,
+          front: newAnnotation.front,
+          back: newAnnotation.back,
+          state: newAnnotation.state,
+          interval: newAnnotation.interval,
+          easeFactor: newAnnotation.easeFactor,
+          dueDate: newAnnotation.dueDate,
+          lastReviewed: newAnnotation.lastReviewed
+        }]);
 
         return updatedAnnotations;
       });
@@ -303,7 +349,7 @@ export default function PDFViewer() {
       };
 
       // Save the updated annotations
-      localStorage.setItem(`pdf_annotations_${file?.name}`, JSON.stringify(updatedAnnotations));
+      saveAnnotations(updatedAnnotations);
 
       return updatedAnnotations;
     });
@@ -316,34 +362,6 @@ export default function PDFViewer() {
       align: 'start', 
       behavior: 'auto'
     });
-  };
-
-  const savePDF = async () => {
-    if (file) {
-      const pdfDoc = await PDFDocument.load(await file.arrayBuffer());
-      const pages = pdfDoc.getPages();
-
-      Object.entries(annotations).forEach(([pageNumber, pageAnnotations]) => {
-        const page = pages[parseInt(pageNumber) - 1];
-        pageAnnotations.forEach((annotation) => {
-          page.drawRectangle({
-            x: annotation.x * page.getWidth(),
-            y: annotation.yPosition * page.getHeight(),
-            width: annotation.width * page.getWidth(),
-            height: annotation.height * page.getHeight(),
-            color: rgb(1, 1, 0),
-            opacity: 0.2,
-          });
-        });
-      });
-
-      const pdfBytes = await pdfDoc.save();
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'annotated_' + file.name;
-      link.click();
-    }
   };
 
   useEffect(() => {
@@ -380,6 +398,8 @@ export default function PDFViewer() {
             pointerEvents: 'auto',
             cursor: 'pointer',
             zIndex: 10,
+            transform: `scale(${1 / scale})`,
+            transformOrigin: 'top left',
           }}
           onMouseEnter={() => setHoveredHighlight({ page: pageNumber, index })}
           onMouseLeave={() => setHoveredHighlight(null)}
@@ -389,8 +409,63 @@ export default function PDFViewer() {
     ));
   };
 
+  const collectAllFlashcards = () => {
+    const allCards = Object.values(annotations).flatMap(pageAnnotations =>
+      pageAnnotations.map(annotation => ({
+        id: annotation.id,
+        front: annotation.front,
+        back: annotation.back,
+        state: annotation.state,
+        interval: annotation.interval,
+        easeFactor: annotation.easeFactor,
+        dueDate: new Date(annotation.dueDate),
+        lastReviewed: annotation.lastReviewed ? new Date(annotation.lastReviewed) : null,
+      }))
+    );
+    setAllFlashcards(allCards);
+    setShowFlashcards(true);
+  };
+
+  const renderLatex = (text: string) => {
+    return text.split(/(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$)/).map((part, index) => {
+      if (part.startsWith('$$') && part.endsWith('$$')) {
+        return <BlockMath key={index}>{part.slice(2, -2)}</BlockMath>;
+      } else if (part.startsWith('$') && part.endsWith('$')) {
+        return <InlineMath key={index}>{part.slice(1, -1)}</InlineMath>;
+      }
+      return part;
+    });
+  };
+
+  const saveAnnotations = (annotations: { [key: number]: Annotation[] }) => {
+    localStorage.setItem(`pdf_annotations_${file?.name}`, JSON.stringify(annotations));
+  };
+
   if (!file) {
     return <FileSelector onFileSelect={handleFileSelect} />;
+  }
+
+  if (showFlashcards) {
+    return (
+      <FlashcardCarousel 
+        flashcards={allFlashcards} 
+        onBack={() => setShowFlashcards(false)}
+        onUpdate={(updatedFlashcards) => {
+          setAllFlashcards(updatedFlashcards);
+          setAnnotations(prevAnnotations => {
+            const updatedAnnotations = { ...prevAnnotations };
+            for (const pageNumber in updatedAnnotations) {
+              updatedAnnotations[pageNumber] = updatedAnnotations[pageNumber].map(ann => {
+                const updatedFlashcard = updatedFlashcards.find(fc => fc.id === ann.id);
+                return updatedFlashcard ? { ...ann, ...updatedFlashcard } : ann;
+              });
+            }
+            saveAnnotations(updatedAnnotations);
+            return updatedAnnotations;
+          });
+        }}
+      />
+    );
   }
 
   return (
@@ -429,10 +504,10 @@ export default function PDFViewer() {
             {isHighlighting ? 'Disable Highlighting' : 'Enable Highlighting'}
           </button>
           <button
-            onClick={savePDF}
-            className="bg-green-500 text-white px-4 py-2 rounded"
+            onClick={collectAllFlashcards}
+            className="bg-purple-500 text-white px-4 py-2 rounded"
           >
-            Save PDF
+            View All Flashcards
           </button>
         </div>
       </header>
@@ -454,8 +529,8 @@ export default function PDFViewer() {
                   onMouseEnter={() => setHoveredAnnotation({ page: Number(pageNumber), index })}
                   onMouseLeave={() => setHoveredAnnotation(null)}
                 >
-                  <p className="text-sm font-semibold">Front: {annotation.front}</p>
-                  <p className="text-sm mt-1">Back: {annotation.back}</p>
+                  <p className="text-sm font-semibold">Front: {renderLatex(annotation.front)}</p>
+                  <p className="text-sm mt-1">Back: {renderLatex(annotation.back)}</p>
                   <p className="text-xs text-gray-500 mt-1">"{annotation.text}"</p>
                   <button
                     onClick={(e) => {
@@ -515,10 +590,10 @@ export default function PDFViewer() {
                 zIndex: 1000,
               }}
             >
-              {/* <h3 className="text-lg font-semibold mb-2">Annotation</h3> */}
-              <h1 className="text-2xl font-bold mb-2">{annotations[openAnnotation.page][openAnnotation.index].front}</h1>
-              <p>{annotations[openAnnotation.page][openAnnotation.index].back}</p>
-              {/* <p><strong>Highlighted text:</strong> "{annotations[openAnnotation.page][openAnnotation.index].text}"</p> */}
+              <h1 className="text-2xl font-bold mb-2">
+                {renderLatex(annotations[openAnnotation.page][openAnnotation.index].front)}
+              </h1>
+              <p>{renderLatex(annotations[openAnnotation.page][openAnnotation.index].back)}</p>
               <button
                 onClick={closeAnnotation}
                 className="mt-4 bg-blue-500 text-white px-4 py-2 rounded"
@@ -540,15 +615,25 @@ export default function PDFViewer() {
               <textarea
                 value={annotationFront}
                 onChange={(e) => setAnnotationFront(e.target.value)}
-                placeholder="Front of flashcard..."
+                placeholder="Front of flashcard... (Use $ for inline LaTeX and $$ for block LaTeX)"
                 className="w-full p-2 border border-gray-300 rounded mb-2"
               />
+              {previewLatex && (
+                <div className="mb-2 p-2 border border-gray-300 rounded">
+                  {renderLatex(annotationFront)}
+                </div>
+              )}
               <textarea
                 value={annotationBack}
                 onChange={(e) => setAnnotationBack(e.target.value)}
-                placeholder="Back of flashcard..."
+                placeholder="Back of flashcard... (Use $ for inline LaTeX and $$ for block LaTeX)"
                 className="w-full p-2 border border-gray-300 rounded"
               />
+              {previewLatex && (
+                <div className="mb-2 p-2 border border-gray-300 rounded">
+                  {renderLatex(annotationBack)}
+                </div>
+              )}
               <div className="flex justify-between mt-2">
                 <button
                   onClick={addAnnotation}
@@ -561,6 +646,12 @@ export default function PDFViewer() {
                   className="bg-gray-500 text-white px-4 py-2 rounded"
                 >
                   Cancel
+                </button>
+                <button
+                  onClick={() => setPreviewLatex(!previewLatex)}
+                  className="bg-green-500 text-white px-4 py-2 rounded"
+                >
+                  {previewLatex ? 'Hide LaTeX' : 'Preview LaTeX'}
                 </button>
               </div>
             </div>,
