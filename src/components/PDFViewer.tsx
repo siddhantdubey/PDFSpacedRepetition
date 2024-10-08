@@ -156,7 +156,7 @@ export default function PDFViewer() {
 
   const zoomOut = () => {
     setScale((prevScale) => {
-      const newScale = prevScale * 1.1;
+      const newScale = prevScale / 1.1;
       setPdfWidth(containerWidth ? containerWidth / newScale : 0);
       return newScale;
     });
@@ -164,13 +164,11 @@ export default function PDFViewer() {
 
   const zoomIn = () => {
     setScale((prevScale) => {
-      const newScale = prevScale / 1.1;
+      const newScale = prevScale * 1.1;
       setPdfWidth(containerWidth ? containerWidth / newScale : 0);
       return newScale;
     });
   };
-
- 
 
   const fitToScreen = async () => {
     if (!documentRef.current || !containerWidth || !containerHeight) return;
@@ -417,7 +415,6 @@ export default function PDFViewer() {
     });
   };
 
-
   const scrollToPage = (pageNumber: number) => {
     setCurrentPage(pageNumber);
     virtuosoRef.current?.scrollToIndex({
@@ -566,7 +563,9 @@ export default function PDFViewer() {
             Fit to Screen
           </button>
           <span className="text-white px-4 py-2">
-            {(scale === 1) ? Math.round(scale * 100) :  100 + Math.round(100 - scale * 100)}%
+            {scale === 1
+              ? Math.round(scale * 100)
+              : 100 + Math.round(100 - scale * 100)}%
           </span>
           <div className="flex items-center ml-4">
             <input
